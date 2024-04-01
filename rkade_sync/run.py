@@ -67,7 +67,7 @@ async def download_song(
             return f"Failed to download {title} from {playlist}"
 
 
-async def main():
+def main():
     # Create clients
     client_sp = SpotipyClient(SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, user=USER)
     client_yt = YTMusicClient(YTMUSIC_OAUTH_DIR)
@@ -83,25 +83,22 @@ async def main():
         playlist_dir = f"{ROOT_DIR}/raw/{playlist_name}"
         Path(playlist_dir).mkdir(parents=True, exist_ok=True)
         # Search for songs
-        playlist_results = await asyncio.gather(
-            *[
-                download_song(
-                    client_yt,
-                    song,
-                    artist,
-                    playlist_name,
-                    playlist_dir,
-                    archive_path,
-                    archive_dict,
-                )
-                for song, artist in playlist_songs
-            ]
-        )
+        playlist_results = [
+            download_song(
+                client_yt,
+                song,
+                artist,
+                playlist_name,
+                playlist_dir,
+                archive_path,
+                archive_dict,
+            )
+            for song, artist in playlist_songs
+        ]
+
         results.append(playlist_results)
     return results
 
 
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(main())
+    main()
