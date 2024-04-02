@@ -21,14 +21,13 @@ class SpotipyClient(spotipy.Spotify):
 
     def get_spotify_playlists_and_songs(
         self, fuzzy_name: str
-    ) -> T.Dict[str, T.Dict[str, T.Any]]:
+    ) -> T.Dict[str, T.List[T.Tuple[str, str]]]:
         """
         Get the Spotify playlists and populate with songs
         """
         playlist_ids = self._get_playlists(fuzzy_name)
         playlist_and_songs = {
-            id: {"id": id, "name": name, "songs": self._get_songs_in_playlist(id, name)}
-            for id, name in playlist_ids
+            name: self._get_songs_in_playlist(id, name) for id, name in playlist_ids
         }
 
         return playlist_and_songs

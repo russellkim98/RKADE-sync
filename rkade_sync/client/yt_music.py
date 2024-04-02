@@ -1,4 +1,4 @@
-from ytmusicapi import YTMusic
+from ytmusicapi import YTMusic, setup
 import typing as T
 
 
@@ -7,10 +7,10 @@ class YTMusicClient(YTMusic):
     YTMusic client for use in getting playlist information
     """
 
-    def __init__(self, headers_path: str):
-        super().__init__(headers_path)
+    def __init__(self, header_dict: T.Dict[str, str]):
+        super().__init__(auth=header_dict)
 
-    def return_top_songs(self, song_name: str) -> T.Tuple[str, str]:
+    def return_top_video_match(self, song_name: str) -> T.Tuple[str, str]:
         """
         Return the top result
         """
