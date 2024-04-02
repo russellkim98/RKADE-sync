@@ -1,82 +1,53 @@
-import spotipy
-import typing as T
-import logging
+# client/spotify.py
+
+from spotipy import Spotify
+from spotipy.oauth2 import SpotifyClientCredentials
+from tqdm.auto import tqdm
 
 
-class SpotipyClient(spotipy.Spotify):
-    """
-    Spotipy client for use in getting playlist information
-    """
-
-    def __init__(self, client_id: str, client_secret: str, **kwargs):
+class SpotifyClient(Spotify):
+    def __init__(self, client_id, client_secret, user):
         super().__init__(
-            auth_manager=spotipy.oauth2.SpotifyClientCredentials(
+            auth_manager=SpotifyClientCredentials(
                 client_id=client_id, client_secret=client_secret
             )
         )
-        if "user" not in kwargs:
-            raise ValueError("user must be provided")
-        self.user = kwargs.get("user", "")
-        self._user_playlists = self.user_playlists(user=self.user)
+        self.user = user
 
-    def get_spotify_playlists_and_songs(
-        self, fuzzy_name: str
-    ) -> T.Dict[str, T.List[T.Tuple[str, str]]]:
-        """
-        Get the Spotify playlists and populate with songs
-        """
-        playlist_ids = self._get_playlists(fuzzy_name)
-        playlist_and_songs = {
-            name: self._get_songs_in_playlist(id, name) for id, name in playlist_ids
-        }
-
-        return playlist_and_songs
-
-    def _get_playlists(self, fuzzy_name: str) -> T.List[T.Tuple[str, str]]:
-        # Filter to playlists with desired names
-        if self._user_playlists is None:
-            return []
-        filtered_playlists = [
-            (pl["id"], pl["name"])
-            for pl in self._user_playlists["items"]
+    def get_spotify_playlists_and_songs(self, fuzzy_name):
+        playlists = self.user_playlists(self.user)
+        matched_playlists = {
+            pl["name"]: pl["id"]
+            for pl in playlists["items"]  # type: ignore
             if fuzzy_name in pl["name"]
-        ]
-        return filtered_playlists
+        }
+        songs = {
+            name: [] for name in matched_playlists.keys()
+        }  # Pre-populate songs dictionary
 
-    def _get_songs_in_playlist(self, id: str, name: str) -> T.List[T.Tuple[str, str]]:
-        """
-        Get the songs in a playlist
-        """
-        songs = []
+        for name, pl_id in tqdm(matched_playlists.items(), mininterval=5):
+            print(f"getting spotify songs for {name}")
+            all_playlist_items = self.get_all_playlist_items(
+                pl_id
+            )  # Helper function for clarity
+            songs[name] = [
+                (track["track"]["name"], track["track"]["artists"][0]["name"])
+                for track in all_playlist_items
+            ]
+        return songs
+
+    def get_all_playlist_items(self, pl_id):
         offset = 0
-        limit = 50
-        logging.log(level=logging.INFO, msg=f"Getting songs for {name} : {id}")
-        print(f"Getting songs for {name} : {id}")
-        while offset % limit == 0:
-            # This is a limit of 50
-            offset_songs = self.playlist_items(
-                id,
-                fields="items(track(artists(name), id, name))",
-                limit=limit,
+        all_items = []
+        while True:
+            playlist_items = self.playlist_items(  # type:ignore
+                pl_id,
+                fields="items(track(name,artists(name)))",
+                limit=100,
                 offset=offset,
-            )
-            if offset_songs is None:
-                continue
-
-            new_songs = offset_songs["items"]
-            for song in new_songs:
-                full_name, artist_names = self._extract_metadata(song)
-                songs.append((full_name, artist_names))
-            offset += len(new_songs)
-
-            print(f"Songs loaded: {len(songs)}")
-        return [s for s in songs]
-
-    def _extract_metadata(self, song: T.Dict[str, T.Any]) -> T.Tuple[str, str]:
-        """
-        Return song names and artist names of the provided song dict
-        """
-        artist_names = " & ".join([a["name"] for a in song["track"]["artists"]])
-        song_name = song["track"]["name"]
-        full_name = f"""{artist_names} - {song_name}"""
-        return full_name, artist_names
+            )["items"]
+            all_items.extend(playlist_items)
+            if len(playlist_items) < 100:
+                break
+            offset += 100
+        return all_items

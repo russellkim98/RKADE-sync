@@ -1,72 +1,102 @@
-import multiprocessing
+import multiprocessing as mp
+import os
 import subprocess
-import typing as T
+from pathlib import Path
 
-from client.spotify import SpotipyClient
-from client.yt_music import YTMusicClient
+from client.spotify import SpotifyClient
+from client.youtube_music import YouTubeMusicClient
 from config import (
     ROOT_DIR,
-    SPOTIPY_CLIENT_ID,
-    SPOTIPY_CLIENT_SECRET,
-    SPOTIPY_USER,
+    SPOTIFY_CLIENT_ID,
+    SPOTIFY_CLIENT_SECRET,
+    SPOTIFY_USER,
     YT_PLAYLISTS,
 )
-from helpers import media, utils
+from helpers import media_helpers, utils
+from tqdm import tqdm
 
 RAW_DIR = f"{ROOT_DIR}/raw"
 
 
-def initialize_clients() -> tuple[SpotipyClient, YTMusicClient]:
+def initialize_clients() -> tuple[SpotifyClient, YouTubeMusicClient]:
     """Initializes Spotify and Youtube Music clients.
 
     Returns:
-        A tuple containing the initialized SpotipyClient and YTMusicClient instances.
+        A tuple containing the SpotifyClient and YouTubeMusicClient instances.
     """
 
-    return (
-        SpotipyClient(
-            client_id=SPOTIPY_CLIENT_ID,
-            client_secret=SPOTIPY_CLIENT_SECRET,
-            user=SPOTIPY_USER,
-        ),
-        YTMusicClient(auth="oauth.json"),
+    spotify_client = SpotifyClient(
+        client_id=SPOTIFY_CLIENT_ID,
+        client_secret=SPOTIFY_CLIENT_SECRET,
+        user=SPOTIFY_USER,
     )
+    youtube_music_client = YouTubeMusicClient(auth="oauth.json")
+    return spotify_client, youtube_music_client
 
 
-def download_song(yt_video: media.YTVideo, playlist):
+def download_song(yt_video: media_helpers.YouTubeVideo, playlist: str) -> None:
+    """Downloads a YouTube Music video as MP3 and sets its thumbnail.
+
+    Args:
+        yt_video: The YouTube Music video object. (Expected type depends on the specific library)
+        playlist: The name of the playlist the video belongs to.
+    """
+
+    print(f"downloading {yt_video.track}")
     final_directory = f"{ROOT_DIR}/playlists/{playlist}"
     file_path = yt_video.download_mp3(
         raw_directory=RAW_DIR, final_directory=final_directory
     )
-    utils.set_thumbnail(file_path, yt_video.youtube.thumbnail_url)
+    success = utils.set_thumbnail(file_path, yt_video.thumbnail_url)
 
 
-def main():
-    """The main entry point for the script."""
+def main() -> dict[str, list[object]]:
+    """Downloads songs from Spotify and Youtube Music playlists.
+
+    Performs user authentication for Youtube Music and initializes clients for both services.
+    Then retrieves video information from playlists and returns a dictionary containing
+    all videos categorized by playlist.
+
+    Returns:
+        A dictionary where keys are playlist names and values are lists of video objects.
+        (The specific video object type depends on the used libraries)
+    """
 
     subprocess.run(["ytmusicapi", "oauth"])
-    sp_client, ytm_client = initialize_clients()
-    sp_playlists = sp_client.get_spotify_playlists_and_songs(fuzzy_name="rekordbox")
-    sp_videos = media.get_spotify_videos(sp_playlists, ytm_client)
-    yt_videos = media.get_ytm_videos(YT_PLAYLISTS)
-    return sp_videos | yt_videos
+    spotify_client, youtube_music_client = initialize_clients()
+    spotify_videos = media_helpers.get_spotify_videos(
+        spotify_client.get_spotify_playlists_and_songs("rekordbox"),
+        youtube_music_client,
+    )
+    youtube_videos = media_helpers.get_youtube_music_videos(YT_PLAYLISTS)
+    youtube_videos = {}
+    return {**spotify_videos, **youtube_videos}
 
 
 if __name__ == "__main__":
     tracks = main()
-    manager = multiprocessing.Manager()
-    processes = []
-    for playlist, videos in tracks.items():
-        for video in videos:
-            p = multiprocessing.Process(
-                target=download_song,
-                args=(
-                    video,
-                    playlist,
-                ),
-            )
-            processes.append(p)
-            p.start()
+    total_songs = sum(
+        len(videos) for playlist, videos in tracks.items()
+    )  # Count total songs
+    progress_counter = mp.Value("i", 0)  # Shared counter for progress
+    pool = mp.Pool(3)
 
-    for process in processes:
-        process.join()
+    with tqdm(total=total_songs, desc="Downloading Songs") as pbar:
+        for playlist, videos in tracks.items():
+            os.makedirs(f"{ROOT_DIR}/playlists/{playlist}", exist_ok=True)
+            for video in videos:
+                pool.starmap_async(
+                    download_song,
+                    [(video, playlist)],
+                    callback=lambda _: progress_counter.value + 1,
+                )
+                utils.set_thumbnail(
+                    f"{ROOT_DIR}/playlists/{playlist}/{video.track}.mp3",  # type: ignore
+                    video.thumbnail_url,  # type: ignore
+                )
+
+    pool.close()
+    pool.join()
+
+    # Ensure final update after all downloads are complete
+    pbar.update(progress_counter.value)
