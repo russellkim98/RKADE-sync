@@ -1,12 +1,12 @@
-import subprocess
 import typing as T
 from dataclasses import dataclass
 from functools import cached_property
 
 import pydub.scipy_effects
 import pydub.silence as silence
+import utils
 from pydub import AudioSegment
-from pytube import Stream, YouTube
+from pytube import Playlist, Stream, YouTube
 
 
 @dataclass
@@ -92,3 +92,52 @@ class YTVideo:
 
         bpm = 60000 / space
         return bpm
+
+
+def get_spotify_videos(sp_playlists, ytm_client) -> T.Dict[str, T.List[YTVideo]]:
+    playlist_map = {}
+    for playlist, songs in sp_playlists.items():
+        print(f"finding for {playlist}...")
+        videos = []
+        total = len(songs)
+        for i, song in enumerate(songs):
+            if i % 10 == 0:
+                print(f"{i}/{total}")
+            title, artist = song
+            track, album, video_id = ytm_client.return_top_video_match(title)
+            video = YTVideo(
+                video_id=video_id,
+                track=track,
+                artist=artist,
+                album=album,
+                playlist=playlist,
+                comments="",
+            )
+            videos.append(video)
+        playlist_map[playlist] = videos
+    return playlist_map
+
+
+def get_ytm_videos(playlists: T.Dict[str, str]) -> T.Dict[str, T.List[YTVideo]]:
+    playlist_map = {}
+    for playlist, url in playlists.items():
+        videos = []
+        for i, v in enumerate(Playlist(url).videos):
+            if i % 10 == 0:
+                print(i)
+            video_info = utils.get_song_title_artist(v.title)
+            video_id = v.video_id
+            track = video_info["title"]
+            artist = video_info["artist"]
+            album = ""
+            video = YTVideo(
+                video_id=video_id,
+                track=track,
+                artist=artist,
+                album=album,
+                playlist=playlist,
+                comments="",
+            )
+            videos.append(video)
+        playlist_map[playlist] = videos
+    return playlist_map

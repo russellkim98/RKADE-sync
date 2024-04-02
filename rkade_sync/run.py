@@ -1,63 +1,72 @@
-import os
+import multiprocessing
+import subprocess
+import typing as T
 
-import eyed3
-import requests
-from eyed3.id3 import Tag
-from eyed3.id3.frames import ImageFrame
-from helpers.media import YTVideo
+from client.spotify import SpotipyClient
+from client.yt_music import YTMusicClient
+from config import (
+    ROOT_DIR,
+    SPOTIPY_CLIENT_ID,
+    SPOTIPY_CLIENT_SECRET,
+    SPOTIPY_USER,
+    YT_PLAYLISTS,
+)
+from helpers import media, utils
+
+RAW_DIR = f"{ROOT_DIR}/raw"
 
 
-def set_thumbnail(mp3_file: str, image_url: str):
+def initialize_clients() -> tuple[SpotipyClient, YTMusicClient]:
+    """Initializes Spotify and Youtube Music clients.
+
+    Returns:
+        A tuple containing the initialized SpotipyClient and YTMusicClient instances.
     """
-    Sets the thumbnail for an MP3 file using an image URL.
 
-    Args:
-        mp3_file (str): Path to the MP3 file.
-        image_url (str): URL of the image to use as thumbnail.
-    """
-    # Download the image
-    response = requests.get(image_url, stream=True)
-    if response.status_code == 200:
-        image_data = response.content
-        mime_type = response.headers.get("Content-Type")
+    return (
+        SpotipyClient(
+            client_id=SPOTIPY_CLIENT_ID,
+            client_secret=SPOTIPY_CLIENT_SECRET,
+            user=SPOTIPY_USER,
+        ),
+        YTMusicClient(auth="oauth.json"),
+    )
 
-        # Load the MP3 file
-        audiofile = eyed3.load(mp3_file)
 
-        # Add the ImageFrame to the MP3 file
-        audiofile.tag.images.set(ImageFrame.FRONT_COVER, image_data, mime_type)  # type: ignore
-
-        # Save the changes to the MP3 file
-        audiofile.tag.save()  # type: ignore
-        print(f"Thumbnail set for {mp3_file}")
-    else:
-        print(f"Error downloading image: {response.status_code}")
+def download_song(yt_video: media.YTVideo, playlist):
+    final_directory = f"{ROOT_DIR}/playlists/{playlist}"
+    file_path = yt_video.download_mp3(
+        raw_directory=RAW_DIR, final_directory=final_directory
+    )
+    utils.set_thumbnail(file_path, yt_video.youtube.thumbnail_url)
 
 
 def main():
-    ROOT = "/Users/russellkim/personal/music"
-    raw_directory = f"{ROOT}/raw"
-    os.makedirs(raw_directory, exist_ok=True)
+    """The main entry point for the script."""
 
-    # For each playlist
-    playlist = "rekordbox_deep_house"
-    final_directory = f"{ROOT}/playlists/{playlist}"
-    os.makedirs(final_directory, exist_ok=True)
-
-    # For song in playlist
-    params = {
-        "video_id": "jvGm_vZmBTg",
-        "track": "Logo Queen",
-        "artist": "So Inagawa",
-        "album": "Logo Queen",
-        "playlist": playlist,
-        "comments": "Awesome!",
-        "bpm": 122,
-    }
-    yt = YTVideo(**params)
-    fp = yt.download_mp3(raw_directory=raw_directory, final_directory=final_directory)
-    set_thumbnail(fp, yt.youtube.thumbnail_url)
+    subprocess.run(["ytmusicapi", "oauth"])
+    sp_client, ytm_client = initialize_clients()
+    sp_playlists = sp_client.get_spotify_playlists_and_songs(fuzzy_name="rekordbox")
+    sp_videos = media.get_spotify_videos(sp_playlists, ytm_client)
+    yt_videos = media.get_ytm_videos(YT_PLAYLISTS)
+    return sp_videos | yt_videos
 
 
 if __name__ == "__main__":
-    main()
+    tracks = main()
+    manager = multiprocessing.Manager()
+    processes = []
+    for playlist, videos in tracks.items():
+        for video in videos:
+            p = multiprocessing.Process(
+                target=download_song,
+                args=(
+                    video,
+                    playlist,
+                ),
+            )
+            processes.append(p)
+            p.start()
+
+    for process in processes:
+        process.join()
