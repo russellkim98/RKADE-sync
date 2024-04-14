@@ -70,7 +70,7 @@ class PlaylistManager:
                         youtube_results=youtube_results,
                         result_type=result_type,
                     )
-                    if result_type == "song":
+                    if result_type != "song":
                         video["title"], video["artist"] = self.extract_song_info(
                             video["title"],
                         )
