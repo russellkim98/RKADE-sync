@@ -1,23 +1,60 @@
+import hashlib
 import os
-from typing import Any, Dict, List
+import time
+from typing import Any, Dict, List, Tuple
 
+import browser_cookie3
 import eyed3
 import Levenshtein as lev
 import requests
+from config import YOUTUBE_MUSIC_COOKIE_NAMES, YOUTUBE_MUSIC_HEADERS
 from eyed3.id3 import frames
 from pydub import AudioSegment
 from pytube import YouTube
 from ytmusicapi import YTMusic
 
 
+def get_youtube_cookies(cookie_jar, cookie_names):
+    return {c.name: c.value for c in cookie_jar if c.name in cookie_names}
+
+
+def generate_sapisidhash_header(SAPISID, origin="https://www.youtube.com"):
+    time_now = round(time.time())
+    sapisidhash = hashlib.sha1(f"{time_now} {SAPISID} {origin}".encode()).hexdigest()
+    return f"SAPISIDHASH {time_now}_{sapisidhash}"
+
+
+def generate_ytm_cookies():
+    cookie_jar = browser_cookie3.chrome()
+    cookies_youtube_music = get_youtube_cookies(cookie_jar, YOUTUBE_MUSIC_COOKIE_NAMES)
+    YOUTUBE_MUSIC_HEADERS["authorization"] = generate_sapisidhash_header(
+        cookies_youtube_music["SAPISID"]
+    )
+    YOUTUBE_MUSIC_HEADERS["cookie"] = "; ".join(
+        [f"{k}={v}" for k, v in cookies_youtube_music.items()]
+    )
+
+    return YOUTUBE_MUSIC_HEADERS
+
+
 class YouTubeMusicDownloader:
-    def __init__(self, headers: Dict[str, str]):
-        self.headers = headers
+    def __init__(self):
+        self.headers = generate_ytm_cookies()
         self.client = YTMusic(auth=self.headers)
+
+    def get_youtube_playlists(self, fuzzy: str = "rekordbox"):
+        all_playlists = self.client.get_library_playlists()
+        return {
+            playlist["title"]: self.client.get_playlist(
+                playlist["playlistId"], limit=400
+            )["tracks"]
+            for playlist in all_playlists
+            if fuzzy in playlist["title"]
+        }
 
     def song_search_results(
         self, title: str, artist: str
-    ) -> List[Dict[str, Any]] | None:
+    ) -> Tuple[List[Dict[str, Any]], str]:
         """
         Search for songs on YouTube Music.
 
@@ -29,10 +66,18 @@ class YouTubeMusicDownloader:
             List[Dict[str, Any]] | None: A list of search results or None if no results found.
         """
         response = self.client.search(f"{title} by {artist}", filter="songs")
-        return response if response else None
+        artists = set(artist["name"] for r in response for artist in r["artists"])
+        if artist.lower() not in [a.lower() for a in artists]:
+            return self.client.search(f"{title} by {artist}", filter="videos"), "video"
+        return response, "song"
 
     def find_best_match(
-        self, title, artist, duration_ms, youtube_results: List[Dict[str, Any]]
+        self,
+        title: str,
+        artist: List[str],
+        duration_ms: int,
+        youtube_results: List[Dict[str, Any]],
+        result_type: str,
     ) -> Dict[str, Any]:
         """
         Find the best matching song on YouTube Music.
@@ -50,13 +95,33 @@ class YouTubeMusicDownloader:
         best_distance = float("inf")
 
         for song in youtube_results:
-            song["duration_ms"] = song["duration_seconds"] * 1000
-            song["artist"] = [artist["name"] for artist in song["artists"]]
+            if result_type == "song":
+                if "duration_seconds" not in song:
+                    song["duration_ms"] = duration_ms
+                else:
+                    song["duration_ms"] = song["duration_seconds"] * 1000
+                if "artists" not in song:
+                    song["artist"] = artist
+                else:
+                    song["artist"] = [
+                        artist["name"]
+                        for artist in song["artists"]
+                        if artist["id"] is not None
+                    ]
+                    if len(song["artist"]) < 1:
+                        song["artist"] = artist
 
-            title_distance = lev.distance(title, song["title"]) / len(title)
-            artist_distance = lev.distance(artist, song["artist"][0]) / len(artist)
-            duration_distance = abs(duration_ms - song["duration_ms"]) / 1000
-            distance = title_distance + artist_distance + duration_distance
+                try:
+                    title_distance = lev.distance(title, song["title"]) / len(title)
+                    artist_distance = lev.distance(artist, song["artist"][0]) / len(
+                        artist
+                    )
+                    duration_distance = abs(duration_ms - song["duration_ms"]) / 1000
+                    distance = title_distance + artist_distance + duration_distance
+                except:
+                    raise Exception(f"Get best video: {song}")
+            else:
+                distance = lev.distance(title, song["title"]) / len(title)
 
             if distance < best_distance:
                 best_distance = distance
@@ -116,7 +181,7 @@ class YouTubeMusicDownloader:
             final_fp,
             format="mp3",
             bitrate="256k",
-            tags={"artist": artists, "album": album, "playlist": playlist},
+            tags={"artist": "; ".join(artists), "album": album, "playlist": playlist},
         )
         return final_fp
 
@@ -138,7 +203,6 @@ class YouTubeMusicDownloader:
                     "image/jpeg",
                 )
                 audiofile.tag.save()
-                print("Thumbnail set successfully.")
             else:
                 print("Audio file not found or does not contain tags.")
         else:

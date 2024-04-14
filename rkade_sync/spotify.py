@@ -32,7 +32,7 @@ class SpotifyClient(Spotify):
             songs[name] = [
                 {
                     "title": track["track"]["name"],
-                    "artist": track["track"]["artists"][0]["name"],
+                    "artist": [artist["name"] for artist in track["track"]["artists"]],
                     "album": track["track"]["album"]["name"],
                     "duration_ms": track["track"]["duration_ms"],
                 }
