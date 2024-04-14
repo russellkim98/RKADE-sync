@@ -1,7 +1,5 @@
-import multiprocessing as mp
+import json
 import os
-import subprocess
-from pathlib import Path
 
 from client.spotify import SpotifyClient
 from client.youtube_music import YouTubeMusicClient
@@ -10,10 +8,10 @@ from config import (
     SPOTIFY_CLIENT_ID,
     SPOTIFY_CLIENT_SECRET,
     SPOTIFY_USER,
+    YOUTUBE_MUSIC_HEADERS,
     YT_PLAYLISTS,
 )
 from helpers import media_helpers, utils
-from tqdm import tqdm
 
 RAW_DIR = f"{ROOT_DIR}/raw"
 
@@ -30,7 +28,7 @@ def initialize_clients() -> tuple[SpotifyClient, YouTubeMusicClient]:
         client_secret=SPOTIFY_CLIENT_SECRET,
         user=SPOTIFY_USER,
     )
-    youtube_music_client = YouTubeMusicClient(auth="oauth.json")
+    youtube_music_client = YouTubeMusicClient(auth=YOUTUBE_MUSIC_HEADERS)
     return spotify_client, youtube_music_client
 
 
@@ -50,7 +48,7 @@ def download_song(yt_video: media_helpers.YouTubeVideo, playlist: str) -> None:
     success = utils.set_thumbnail(file_path, yt_video.thumbnail_url)
 
 
-def main() -> dict[str, list[object]]:
+def main():
     """Downloads songs from Spotify and Youtube Music playlists.
 
     Performs user authentication for Youtube Music and initializes clients for both services.
@@ -61,42 +59,17 @@ def main() -> dict[str, list[object]]:
         A dictionary where keys are playlist names and values are lists of video objects.
         (The specific video object type depends on the used libraries)
     """
-
-    subprocess.run(["ytmusicapi", "oauth"])
     spotify_client, youtube_music_client = initialize_clients()
-    spotify_videos = media_helpers.get_spotify_videos(
-        spotify_client.get_spotify_playlists_and_songs("rekordbox"),
-        youtube_music_client,
+    # get spotify playlists
+    # spotify_metadata = spotify_client.get_spotify_playlists_and_songs("rekordbox")
+    with open(f"{ROOT_DIR}/metadata/spotify_playlist_song_info.json", "r") as fp:
+        spotify_metadata = json.load(fp)
+
+    # save spotify playlist information to json
+    result = spotify_client.save_spotify_playlist_song_metadata(
+        root=ROOT_DIR, new_metadata=spotify_metadata
     )
-    youtube_videos = media_helpers.get_youtube_music_videos(YT_PLAYLISTS)
-    youtube_videos = {}
-    return {**spotify_videos, **youtube_videos}
 
 
 if __name__ == "__main__":
-    tracks = main()
-    total_songs = sum(
-        len(videos) for playlist, videos in tracks.items()
-    )  # Count total songs
-    progress_counter = mp.Value("i", 0)  # Shared counter for progress
-    pool = mp.Pool(3)
-
-    with tqdm(total=total_songs, desc="Downloading Songs") as pbar:
-        for playlist, videos in tracks.items():
-            os.makedirs(f"{ROOT_DIR}/playlists/{playlist}", exist_ok=True)
-            for video in videos:
-                pool.starmap_async(
-                    download_song,
-                    [(video, playlist)],
-                    callback=lambda _: progress_counter.value + 1,
-                )
-                utils.set_thumbnail(
-                    f"{ROOT_DIR}/playlists/{playlist}/{video.track}.mp3",  # type: ignore
-                    video.thumbnail_url,  # type: ignore
-                )
-
-    pool.close()
-    pool.join()
-
-    # Ensure final update after all downloads are complete
-    pbar.update(progress_counter.value)
+    main()
