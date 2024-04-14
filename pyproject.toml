@@ -19,6 +19,8 @@ async-pytube = "^1.0.2"
 scipy = "^1.12.0"
 urllib3 = "^2.2.1"
 tqdm = "^4.66.2"
+youtubemusicapi = "^2.8"
+selenium = "^4.19.0"
 
 
 [build-system]
