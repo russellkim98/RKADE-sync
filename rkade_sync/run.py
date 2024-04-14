@@ -1,74 +1,83 @@
-import json
-import os
+import hashlib
+import itertools
+import time
 
-from client.spotify import SpotifyClient
-from client.youtube_music import YouTubeMusicClient
+import browser_cookie3
 from config import (
-    ROOT_DIR,
+    ROOT,
     SPOTIFY_CLIENT_ID,
     SPOTIFY_CLIENT_SECRET,
     SPOTIFY_USER,
+    YOUTUBE_MUSIC_COOKIE_NAMES,
     YOUTUBE_MUSIC_HEADERS,
-    YT_PLAYLISTS,
 )
-from helpers import media_helpers, utils
+from playlist_manager import PlaylistManager
+from spotify import SpotifyClient
+from youtube import YouTubeMusicDownloader
 
-RAW_DIR = f"{ROOT_DIR}/raw"
+
+def get_youtube_cookies(cookie_jar, cookie_names):
+    return {c.name: c.value for c in cookie_jar if c.name in cookie_names}
 
 
-def initialize_clients() -> tuple[SpotifyClient, YouTubeMusicClient]:
-    """Initializes Spotify and Youtube Music clients.
+def get_youtube_playlists(ytm_downloader):
+    all_playlists = ytm_downloader.client.get_library_playlists()
+    return {
+        playlist["title"]: ytm_downloader.client.get_playlist(
+            playlist["playlistId"], limit=400
+        )["tracks"]
+        for playlist in all_playlists
+        if "rekordbox" in playlist["title"]
+    }
 
-    Returns:
-        A tuple containing the SpotifyClient and YouTubeMusicClient instances.
-    """
+
+def get_spotify_playlists(spotify_client):
+    return spotify_client.get_spotify_playlists_and_songs("rekordbox")
+
+
+def generate_sapisidhash_header(SAPISID, origin="https://www.youtube.com"):
+    time_now = round(time.time())
+    sapisidhash = hashlib.sha1(f"{time_now} {SAPISID} {origin}".encode()).hexdigest()
+    return f"SAPISIDHASH {time_now}_{sapisidhash}"
+
+
+def main():
+    cookie_jar = browser_cookie3.chrome()
+    cookies_youtube_music = get_youtube_cookies(cookie_jar, YOUTUBE_MUSIC_COOKIE_NAMES)
+    YOUTUBE_MUSIC_HEADERS["authorization"] = generate_sapisidhash_header(
+        cookies_youtube_music["SAPISID"]
+    )
+    YOUTUBE_MUSIC_HEADERS["cookie"] = "; ".join(
+        [f"{k}={v}" for k, v in cookies_youtube_music.items()]
+    )
+
+    ytm_downloader = YouTubeMusicDownloader(headers=YOUTUBE_MUSIC_HEADERS)
+    youtube_info = get_youtube_playlists(ytm_downloader)
 
     spotify_client = SpotifyClient(
         client_id=SPOTIFY_CLIENT_ID,
         client_secret=SPOTIFY_CLIENT_SECRET,
         user=SPOTIFY_USER,
     )
-    youtube_music_client = YouTubeMusicClient(auth=YOUTUBE_MUSIC_HEADERS)
-    return spotify_client, youtube_music_client
+    spotify_info = get_spotify_playlists(spotify_client)
 
+    playlist_manager = PlaylistManager(ytm_downloader, ROOT)
 
-def download_song(yt_video: media_helpers.YouTubeVideo, playlist: str) -> None:
-    """Downloads a YouTube Music video as MP3 and sets its thumbnail.
+    playlists = {
+        playlist: playlist_manager.standardize_playlist(
+            playlist,
+            list(
+                itertools.chain(
+                    spotify_info.get(playlist, {}), youtube_info.get(playlist, {})
+                )
+            ),
+        )
+        # for playlist in itertools.chain(spotify_info.keys(), youtube_info.keys())
+        for playlist in ["rekordbox_house_pop"]
+    }
 
-    Args:
-        yt_video: The YouTube Music video object. (Expected type depends on the specific library)
-        playlist: The name of the playlist the video belongs to.
-    """
-
-    print(f"downloading {yt_video.track}")
-    final_directory = f"{ROOT_DIR}/playlists/{playlist}"
-    file_path = yt_video.download_mp3(
-        raw_directory=RAW_DIR, final_directory=final_directory
-    )
-    success = utils.set_thumbnail(file_path, yt_video.thumbnail_url)
-
-
-def main():
-    """Downloads songs from Spotify and Youtube Music playlists.
-
-    Performs user authentication for Youtube Music and initializes clients for both services.
-    Then retrieves video information from playlists and returns a dictionary containing
-    all videos categorized by playlist.
-
-    Returns:
-        A dictionary where keys are playlist names and values are lists of video objects.
-        (The specific video object type depends on the used libraries)
-    """
-    spotify_client, youtube_music_client = initialize_clients()
-    # get spotify playlists
-    # spotify_metadata = spotify_client.get_spotify_playlists_and_songs("rekordbox")
-    with open(f"{ROOT_DIR}/metadata/spotify_playlist_song_info.json", "r") as fp:
-        spotify_metadata = json.load(fp)
-
-    # save spotify playlist information to json
-    result = spotify_client.save_spotify_playlist_song_metadata(
-        root=ROOT_DIR, new_metadata=spotify_metadata
-    )
+    for name, info in playlists.items():
+        playlist_manager.download_playlist(name, info)
 
 
 if __name__ == "__main__":

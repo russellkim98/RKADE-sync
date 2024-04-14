@@ -1,7 +1,10 @@
 import os
 from typing import Any, Dict, List
 
+import eyed3
+import Levenshtein as lev
 import requests
+from eyed3.id3 import frames
 from pydub import AudioSegment
 from pytube import YouTube
 from ytmusicapi import YTMusic
@@ -29,35 +32,30 @@ class YouTubeMusicDownloader:
         return response if response else None
 
     def find_best_match(
-        self, spotify_info: Dict[str, Any], youtube_results: List[Dict[str, Any]]
+        self, title, artist, duration_ms, youtube_results: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
         Find the best matching song on YouTube Music.
 
         Args:
-            spotify_info (Dict[str, Any]): Information about the song from Spotify.
+            song_info (Dict[str, Any]): Information about the song from Spotify.
             youtube_results (List[Dict[str, Any]]): List of search results from YouTube Music.
 
         Returns:
             Dict[str, Any]: The best matching song.
         """
-        best_video = None
+        best_video = youtube_results[0]
+        best_video["duration_ms"] = best_video["duration_seconds"] * 1000
+        best_video["artist"] = [artist["name"] for artist in best_video["artists"]]
         best_distance = float("inf")
 
         for song in youtube_results:
-            youtube_info = {
-                "title": song["title"],
-                "artist": " & ".join([artist["name"] for artist in song["artists"]]),
-                "duration_ms": song["duration_seconds"] * 1000,
-            }
+            song["duration_ms"] = song["duration_seconds"] * 1000
+            song["artist"] = [artist["name"] for artist in song["artists"]]
 
-            title_distance = lev.distance(spotify_info["title"], youtube_info["title"])
-            artist_distance = lev.distance(
-                spotify_info["artist"], youtube_info["artist"]
-            )
-            duration_distance = (
-                abs(spotify_info["duration_ms"] - youtube_info["duration_ms"]) / 10000
-            )
+            title_distance = lev.distance(title, song["title"]) / len(title)
+            artist_distance = lev.distance(artist, song["artist"][0]) / len(artist)
+            duration_distance = abs(duration_ms - song["duration_ms"]) / 1000
             distance = title_distance + artist_distance + duration_distance
 
             if distance < best_distance:
@@ -82,6 +80,8 @@ class YouTubeMusicDownloader:
             f"https://music.youtube.com/watch?v={video_id}", use_oauth=True
         )
         stream = youtube.streams.filter(only_audio=True).order_by("abr").last()
+        if not stream:
+            return "Couldn't find stream"
         raw_fp = stream.download(
             output_path=output_path, filename=f"{filename}.{stream.subtype}"
         )
@@ -90,9 +90,9 @@ class YouTubeMusicDownloader:
     def convert_to_mp3(
         self,
         raw_file_path: str,
-        output_path: str,
+        output_dir: str,
         title: str,
-        artist: str,
+        artists: List[str],
         album: str,
         playlist: str,
     ) -> str:
@@ -101,7 +101,7 @@ class YouTubeMusicDownloader:
 
         Args:
             raw_file_path (str): Path to the raw audio file.
-            output_path (str): Path to save the converted mp3 file.
+            output_dir (str): Path to save the converted mp3 file.
             title (str): Title of the song.
             artist (str): Artist of the song.
             album (str): Album name.
@@ -111,12 +111,12 @@ class YouTubeMusicDownloader:
             str: Path to the converted mp3 file.
         """
         raw_audio = AudioSegment.from_file(raw_file_path)
-        final_fp = os.path.join(output_path, f"{title}.mp3")
+        final_fp = os.path.join(output_dir, f"{title}.mp3")
         raw_audio.export(
             final_fp,
             format="mp3",
             bitrate="256k",
-            tags={"artist": artist, "album": album, "playlist": playlist},
+            tags={"artist": artists, "album": album, "playlist": playlist},
         )
         return final_fp
 
@@ -133,7 +133,7 @@ class YouTubeMusicDownloader:
             audiofile = eyed3.load(audio_path)
             if audiofile and audiofile.tag:
                 audiofile.tag.images.set(
-                    eyed3.id3.frames.ImageFrame.FRONT_COVER,
+                    frames.ImageFrame.FRONT_COVER,
                     response.content,
                     "image/jpeg",
                 )

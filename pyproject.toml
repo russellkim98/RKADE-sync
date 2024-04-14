@@ -21,6 +21,10 @@ urllib3 = "^2.2.1"
 tqdm = "^4.66.2"
 youtubemusicapi = "^2.8"
 selenium = "^4.19.0"
+levenshtein = "^0.25.1"
+pandas = "^2.2.2"
+browser-cookie3 = "^0.19.1"
+musicbrainzngs = "^0.7.1"
 
 
 [build-system]
