@@ -1,5 +1,4 @@
-# client/spotify.py
-import typing as T
+from typing import Any, Dict, List
 
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyClientCredentials
@@ -14,7 +13,7 @@ class SpotifyClient(Spotify):
         )
         self.user = user
 
-    def get_spotify_playlists_and_songs(self, fuzzy_name) -> T.Dict[str, T.List[T.Any]]:
+    def get_spotify_playlists_and_songs(self, fuzzy_name) -> Dict[str, List[Any]]:
         playlists = self.user_playlists(self.user)
         matched_playlists = {
             pl["name"]: pl["id"]
@@ -31,17 +30,18 @@ class SpotifyClient(Spotify):
                 pl_id
             )  # Helper function for clarity
             songs[name] = [
-                (
-                    track["track"]["name"],
-                    track["track"]["artists"][0]["name"],
-                    track["track"]["album"]["name"],
-                    track["track"]["duration_ms"],
-                )
+                {
+                    "title": track["track"]["name"],
+                    "artist": [artist["name"] for artist in track["track"]["artists"]],
+                    "album": track["track"]["album"]["name"],
+                    "duration_ms": track["track"]["duration_ms"],
+                }
                 for track in all_playlist_items
             ]
+
         return songs
 
-    def get_all_playlist_items(self, pl_id) -> T.List[T.Dict[str, T.Any]]:
+    def get_all_playlist_items(self, pl_id) -> List[Dict[str, Any]]:
         offset = 0
         all_items = []
         while True:
