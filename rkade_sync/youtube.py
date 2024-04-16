@@ -5,12 +5,12 @@ from typing import Any, Dict, List, Tuple
 
 import browser_cookie3
 import eyed3
-import Levenshtein as lev
 import requests
 from config import YOUTUBE_MUSIC_COOKIE_NAMES, YOUTUBE_MUSIC_HEADERS
 from eyed3.id3 import frames
-from pydub import AudioSegment
+from pydub import AudioSegment, effects
 from pytube import YouTube
+from thefuzz import fuzz
 from ytmusicapi import YTMusic
 
 
@@ -53,8 +53,8 @@ class YouTubeMusicDownloader:
         }
 
     def song_search_results(
-        self, title: str, artist: str
-    ) -> Tuple[List[Dict[str, Any]], str]:
+        self, title: str, artists: List[str], video_type: str
+    ) -> List[Dict[str, Any]]:
         """
         Search for songs on YouTube Music.
 
@@ -65,69 +65,113 @@ class YouTubeMusicDownloader:
         Returns:
             List[Dict[str, Any]] | None: A list of search results or None if no results found.
         """
-        response = self.client.search(f"{title} by {artist}", filter="songs")
-        artists = set(artist["name"] for r in response for artist in r["artists"])
-        if artist.lower() not in [a.lower() for a in artists]:
-            return self.client.search(f"{title} by {artist}", filter="videos"), "video"
-        return response, "song"
+        artist = " & ".join(artists)
+        response = self.client.search(f"{title} by {artist}", filter=video_type)
+        return response
 
-    def find_best_match(
+    def find_best_match_yt(
         self,
         title: str,
         artist: List[str],
         duration_ms: int,
-        youtube_results: List[Dict[str, Any]],
-        result_type: str,
+        yt_results: List[Dict[str, Any]],
+        tolerance: float = 0.8,
     ) -> Dict[str, Any]:
-        """
-        Find the best matching song on YouTube Music.
+        best_score = float("-inf")
+        best_result = {}
+        query_title = f"{title} - {artist[0]}"
 
-        Args:
-            song_info (Dict[str, Any]): Information about the song from Spotify.
-            youtube_results (List[Dict[str, Any]]): List of search results from YouTube Music.
+        for video in yt_results:
 
-        Returns:
-            Dict[str, Any]: The best matching song.
-        """
-        best_video = youtube_results[0]
-        best_video["duration_ms"] = best_video["duration_seconds"] * 1000
-        best_video["artist"] = [artist["name"] for artist in best_video["artists"]]
-        best_distance = float("inf")
+            video_title = video.get("title", title)
+            distance_title = (
+                fuzz.partial_token_sort_ratio(query_title, video_title) / 100
+            )
+            if distance_title < tolerance:
+                continue
 
-        for song in youtube_results:
-            if result_type == "song":
-                if "duration_seconds" not in song:
-                    song["duration_ms"] = duration_ms
-                else:
-                    song["duration_ms"] = song["duration_seconds"] * 1000
-                if "artists" not in song:
-                    song["artist"] = artist
-                else:
-                    song["artist"] = [
-                        artist["name"]
-                        for artist in song["artists"]
-                        if artist["id"] is not None
-                    ]
-                    if len(song["artist"]) < 1:
-                        song["artist"] = artist
+            video_duration_ms = max(
+                [video.get("duration_seconds", -1) * 1000, video.get("duration_ms", 0)]
+            )
+            distance_duration = (
+                1 - abs(duration_ms - video_duration_ms) / duration_ms / 100
+            )
+            if distance_duration < tolerance:
+                continue
+            score = distance_title * distance_duration
 
-                try:
-                    title_distance = lev.distance(title, song["title"]) / len(title)
-                    artist_distance = lev.distance(artist, song["artist"][0]) / len(
-                        artist
-                    )
-                    duration_distance = abs(duration_ms - song["duration_ms"]) / 1000
-                    distance = title_distance + artist_distance + duration_distance
-                except:
-                    raise Exception(f"Get best video: {song}")
+            if len(video.get("album", [])) < 1:
+                album = title
             else:
-                distance = lev.distance(title, song["title"]) / len(title)
+                album = video["album"]["name"]
+            result = dict(
+                title=title,
+                artist=artist,
+                duration_ms=video_duration_ms,
+                album=album,
+                video_id=video["videoId"],
+                thumbnail_url=video["thumbnails"][-1]["url"],
+                filename=f"{title} - {' & '.join(artist)}".replace("/", "|"),
+            )
+            if score > best_score:
+                best_score = score
+                best_result = result
 
-            if distance < best_distance:
-                best_distance = distance
-                best_video = song
+        return best_result
 
-        return best_video
+    def find_best_match_ytm(
+        self,
+        title: str,
+        artist: List[str],
+        duration_ms: int,
+        ytm_results: List[Dict[str, Any]],
+        tolerance: float = 0.8,
+    ) -> Dict[str, Any]:
+
+        best_score = float("-inf")
+        best_result = {}
+        for video in ytm_results:
+
+            video_title = video.get("title", title)
+            distance_title = fuzz.partial_ratio(title, video_title) / 100
+            if distance_title < tolerance:
+                continue
+
+            yt_artist = video.get("artists", [])
+            video_artist = (
+                [a["name"] for a in yt_artist] if len(yt_artist) > 0 else artist
+            )
+
+            distance_artist = fuzz.partial_ratio(artist[0], video_artist[0]) / 100
+            if distance_artist < tolerance:
+                continue
+
+            video_duration_ms = max(
+                [video.get("duration_seconds", -1) * 1000, video.get("duration_ms", 0)]
+            )
+            distance_duration = (
+                1 - abs(duration_ms - video_duration_ms) / duration_ms / 100
+            )
+            if distance_duration < tolerance:
+                continue
+
+            score = distance_title * distance_artist * distance_duration
+            result = dict(
+                title=video_title,
+                artist=video_artist,
+                album=video["album"]["name"],
+                duration_ms=video_duration_ms,
+                video_id=video["videoId"],
+                thumbnail_url=video["thumbnails"][-1]["url"],
+                filename=f"{video_title} - {' & '.join(video_artist)}".replace(
+                    "/", "|"
+                ),
+            )
+
+            if score > best_score:
+                best_score = score
+                best_result = result
+        return best_result
 
     def download_audio(self, video_id: str, output_path: str, filename: str) -> str:
         """
@@ -144,9 +188,12 @@ class YouTubeMusicDownloader:
         youtube = YouTube(
             f"https://music.youtube.com/watch?v={video_id}", use_oauth=True
         )
-        stream = youtube.streams.filter(only_audio=True).order_by("abr").last()
-        if not stream:
-            return "Couldn't find stream"
+        try:
+            stream = youtube.streams.filter(only_audio=True).order_by("abr").last()
+        except Exception as e:
+            return f"Exception: {e}"
+        if stream is None:
+            return "No stream available"
         raw_fp = stream.download(
             output_path=output_path, filename=f"{filename}.{stream.subtype}"
         )
@@ -175,7 +222,7 @@ class YouTubeMusicDownloader:
         Returns:
             str: Path to the converted mp3 file.
         """
-        raw_audio = AudioSegment.from_file(raw_file_path)
+        raw_audio = effects.normalize(AudioSegment.from_file(raw_file_path))
         final_fp = os.path.join(output_dir, f"{title}.mp3")
         raw_audio.export(
             final_fp,

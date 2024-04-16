@@ -13,7 +13,9 @@ class SpotifyClient(Spotify):
         )
         self.user = user
 
-    def get_spotify_playlists_and_songs(self, fuzzy_name) -> Dict[str, List[Any]]:
+    def get_spotify_playlists_and_songs(
+        self, fuzzy_name: str = "rekordbox"
+    ) -> Dict[str, List[Any]]:
         playlists = self.user_playlists(self.user)
         matched_playlists = {
             pl["name"]: pl["id"]
