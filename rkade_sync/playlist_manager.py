@@ -104,6 +104,9 @@ class PlaylistManager:
                 print(f"{perc}% done searching for {playlist} ({i+1}/{num_total})")
             try:
                 s = self.standardize_song(preprocessed)
+                if len(s) < 3:
+                    s = preprocessed
+                    s["info_status"] = "failed"
                 s["info_status"] = "success"
             except Exception as e:
                 print(f"Failed: {preprocessed}. Error: {e}")
@@ -152,12 +155,20 @@ class PlaylistManager:
         num_total = len(info["songs"])
         current_interval = 0
         for i, song in enumerate(info["songs"]):
+            if len(song) < 3:
+                print("hello???")
+            poss_raw_mp4 = f"{info['raw_dir']}/{song.get('filename', '')}.mp4"
+            poss_raw_webm = f"{info['clean_dir']}/{song.get('filename', '')}.webm"
+            poss_clean = f"{info['clean_dir']}/{song.get('filename', '')}.mp3"
             if song["info_status"] == "failed":
                 raw_path = "na"
                 clean_path = "na"
-            elif os.path.exists(f"{info['clean_dir']}/{song.get('filename', '')}.mp3"):
+            elif os.path.exists(poss_clean):
+                raw_path = (
+                    poss_raw_mp4 if os.path.exists(poss_raw_mp4) else poss_raw_webm
+                )
+                clean_path = poss_clean
                 print("Song already downloaded")
-                continue
             else:
                 perc = (i / num_total * 100) // 10 * 10
                 if perc > current_interval:
@@ -171,4 +182,5 @@ class PlaylistManager:
             songs.append(song)
 
         print(f"Done downloading {name}")
-        return songs
+        info["songs"] = songs
+        return info
