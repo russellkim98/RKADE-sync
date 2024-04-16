@@ -152,7 +152,7 @@ class PlaylistManager:
         num_total = len(info["songs"])
         current_interval = 0
         for i, song in enumerate(info["songs"]):
-            if song["info_status"] == "failure":
+            if song["info_status"] == "failed":
                 raw_path = "na"
                 clean_path = "na"
             else:
