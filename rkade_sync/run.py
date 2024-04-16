@@ -8,8 +8,8 @@ from playlist_manager import PlaylistManager
 from spotify import SpotifyClient
 
 # Set debug flags
-INFO_DEBUG = False
-DOWNLOAD_DEBUG = False
+INFO_DEBUG = True
+DOWNLOAD_DEBUG = True
 
 
 def get_metadata_from_file(path: str) -> Dict[str, Any]:
@@ -87,6 +87,7 @@ def main():
 
     write_metadata_to_file(playlist_info, playlists_path)
     # Download playlists and update metadata
+    print("downloading playlists..")
     for name, info in playlist_info.items():
         playlist_info[name] = playlist_manager.download_playlist(name, info)
     write_metadata_to_file(playlist_info, playlists_path)

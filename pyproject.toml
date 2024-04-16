@@ -26,6 +26,9 @@ pandas = "^2.2.2"
 browser-cookie3 = "^0.19.1"
 musicbrainzngs = "^0.7.1"
 thefuzz = "^0.22.1"
+pyrekordbox = "^0.3.2"
+pysqlcipher3 = "^1.2.0"
+ollama = "^0.1.8"
 
 
 [build-system]

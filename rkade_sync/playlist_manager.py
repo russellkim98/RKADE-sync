@@ -155,6 +155,9 @@ class PlaylistManager:
             if song["info_status"] == "failed":
                 raw_path = "na"
                 clean_path = "na"
+            elif os.path.exists(f"{info['clean_dir']}/{song.get('filename', '')}.mp3"):
+                print("Song already downloaded")
+                continue
             else:
                 perc = (i / num_total * 100) // 10 * 10
                 if perc > current_interval:
