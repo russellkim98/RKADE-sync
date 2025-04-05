@@ -131,7 +131,6 @@ dmypy.json
 
 .DS_Store
 
-**/config.py
 **/*.json
 **/*.ipynb
 
