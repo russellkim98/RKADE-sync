@@ -1,22 +1,25 @@
-"""Main module for the music matcher application."""
+import json
+import re
+from datetime import datetime
+from typing import Dict, List, Optional
 
-import argparse
-import sys
-import time
-from typing import Any, Dict, Optional
-
-from clients.llm_client import LLMClient
-from clients.spotify_client import SpotifyClient
-from clients.ytmusic_client import YTMusicClient
-from config import Config
-from database import Database
-from matchers.fuzzy_matcher import FuzzyMatcher
-from matchers.llm_matcher import LLMMatcher
-from utils.logging_utils import setup_logging
+import ollama
+import pandas as pd
+import spotipy
+from fuzzywuzzy import fuzz
+from Levenshtein import jaro_winkler
+from spotipy.oauth2 import SpotifyClientCredentials
+from ytmusicapi import YTMusic
 
 
-class MusicMatcherApp:
-    """Main application class for music matching."""
+class MusicMatcher:
+    # Scoring Weights & Thresholds
+    TITLE_WEIGHT = 0.5
+    ARTIST_WEIGHT = 0.3
+    DURATION_WEIGHT = 0.2
+    LLM_SCORE_THRESHOLD = 85
+    LLM_SCORE_DIFFERENCE = 15
+    MAX_YOUTUBE_RESULTS = 10
 
     def __init__(
         self,
@@ -25,298 +28,221 @@ class MusicMatcherApp:
         ytmusic_auth_path: str = "browser.json",
         debug: bool = False,
     ):
-        """Initialize music matcher application.
+        self.spotify = self._init_spotify(spotify_client_id, spotify_client_secret)
+        self.ytmusic = YTMusic(auth=ytmusic_auth_path)
+        self.debug = debug
+        self.logs: List[Dict] = []
 
-        Args:
-            spotify_client_id: Spotify API client ID
-            spotify_client_secret: Spotify API client secret
-            ytmusic_auth_path: Path to YTMusic auth JSON file
-            debug: Enable debug logging
+    # === Auth / Client Setup ===
+
+    @staticmethod
+    def _init_spotify(client_id: str, client_secret: str) -> spotipy.Spotify:
+        credentials = SpotifyClientCredentials(client_id, client_secret)
+        return spotipy.Spotify(auth_manager=credentials)
+
+    # === Logging ===
+
+    def _log_debug(self, message: str, divider: bool = False):
+        if not self.debug:
+            return
+        if divider:
+            message = f"\n{'=' * 50}\n{message}\n{'=' * 50}"
+        print(message)
+        self.logs.append({"timestamp": datetime.now(), "message": message})
+
+    def get_debug_logs(self) -> pd.DataFrame:
+        return pd.DataFrame(self.logs)
+
+    # === Track Matching ===
+
+    def match_tracks(self, spotify_track: Dict, youtube_results: List[Dict]) -> Dict:
+        """Match a Spotify track with the best YouTube Music result."""
+        sp_title = self._normalize_text(spotify_track["name"])
+        sp_artist = self._normalize_text(spotify_track["artists"][0]["name"])
+        sp_duration = spotify_track["duration_ms"] // 1000
+
+        self._log_debug(
+            f"MATCHING: {spotify_track['name']} by {spotify_track['artists'][0]['name']} ({sp_duration}s)",
+            divider=True,
+        )
+
+        scored = [
+            self._score_match(sp_title, sp_artist, sp_duration, yt)
+            for yt in youtube_results
+        ]
+        scored.sort(reverse=True, key=lambda x: x[0])
+        top_candidates = [track for _, track in scored[:3]]
+
+        self._log_debug("TOP MATCHES:")
+        for idx, (score, track) in enumerate(scored[:3], 1):
+            self._log_debug(f"{idx}. {track.get('title')} - Score: {score:.1f}")
+
+        # LLM fallback
+        top_score = scored[0][0]
+        second_score = scored[1][0] if len(scored) > 1 else 0
+        if (
+            top_score < self.LLM_SCORE_THRESHOLD
+            or (top_score - second_score) < self.LLM_SCORE_DIFFERENCE
+        ):
+            self._log_debug("Triggering LLM fallback...")
+            return self._resolve_with_llm(spotify_track, top_candidates)
+
+        return top_candidates[0]
+
+    def _score_match(self, sp_title, sp_artist, sp_duration, yt: Dict) -> tuple:
+        yt_title = self._normalize_text(yt.get("title", ""))
+        yt_artist = (
+            self._normalize_text(yt["artists"][0]["name"]) if yt.get("artists") else ""
+        )
+        yt_duration = yt.get("duration_seconds", 0)
+
+        title_score = fuzz.token_sort_ratio(sp_title, yt_title)
+        artist_score = jaro_winkler(sp_artist, yt_artist) * 100
+        duration_score = max(0, 100 - abs(sp_duration - yt_duration))
+
+        total_score = (
+            title_score * self.TITLE_WEIGHT
+            + artist_score * self.ARTIST_WEIGHT
+            + duration_score * self.DURATION_WEIGHT
+        )
+
+        if self.debug:
+            self._log_debug(
+                f"{yt.get('title', '')} | Artist: {yt_artist} | Duration: {yt_duration}s\n"
+                f"→ Title: {title_score:.1f}, Artist: {artist_score:.1f}, Duration: {duration_score:.1f}, Total: {total_score:.1f}\n"
+                + "-" * 40
+            )
+
+        return total_score, yt
+
+    # === LLM Matching ===
+
+    def _resolve_with_llm(self, spotify_track: Dict, candidates: List[Dict]) -> Dict:
+        def format_candidate(i: int, c: Dict) -> str:
+            return f"{i}. {self._safe_get(c, ['title'], 'Unknown')} by {self._safe_get(c, ['artists', 0, 'name'], 'Unknown')} ({self._safe_get(c, ['duration'], '?')}) | Album: {self._safe_get(c, ['album', 'name'], 'unknown')}"
+
+        prompt = f"""
+        Analyze this music track matching request. Return JSON with 'index' (0-2) and 'confidence' (0-100).
+
+        Spotify Track:
+        - Title: {spotify_track['name']}
+        - Artist: {spotify_track['artists'][0]['name']}
+        - Album: {spotify_track['album']['name']}
+        - Duration: {spotify_track['duration_ms']//1000}s
+
+        YouTube Candidates:
+        {json.dumps([format_candidate(i, c) for i, c in enumerate(candidates)], indent=2)}
         """
-        # Initialize database
-        self.db = Database(Config.DATABASE_PATH)
 
-        # Start tracking run
-        self.run_id = self.db.start_run(
-            {
-                "spotify_client_id": spotify_client_id,
-                "ytmusic_auth_path": ytmusic_auth_path,
-                "debug": debug,
-                "config": {
-                    k: v for k, v in vars(Config).items() if not k.startswith("_")
-                },
-            }
-        )
-
-        # Set up logging
-        log_level = "DEBUG" if debug else Config.LOG_LEVEL
-        self.logger = setup_logging(Config.LOG_FILE, log_level, self.db, self.run_id)
-
-        # Initialize clients
-        self.logger.info("Initializing clients")
-        self.spotify = SpotifyClient(
-            spotify_client_id, spotify_client_secret, self.logger
-        )
-        self.ytmusic = YTMusicClient(ytmusic_auth_path, self.logger)
-        self.llm_client = LLMClient(
-            model=Config.LLM_MODEL,
-            temperature=Config.LLM_TEMPERATURE,
-            context_size=Config.LLM_CONTEXT_SIZE,
-            logger=self.logger,
-            db=self.db,
-            run_id=self.run_id,
-        )
-
-        # Initialize matchers
-        self.logger.info("Initializing matchers")
-        self.llm_matcher = LLMMatcher(self.llm_client, self.logger)
-        self.fuzzy_matcher = FuzzyMatcher(
-            title_weight=Config.TITLE_WEIGHT,
-            artist_weight=Config.ARTIST_WEIGHT,
-            duration_weight=Config.DURATION_WEIGHT,
-            llm_score_threshold=Config.LLM_SCORE_THRESHOLD,
-            llm_score_difference=Config.LLM_SCORE_DIFFERENCE,
-            logger=self.logger,
-        )
-
-        # Set LLM matcher for fuzzy matcher fallback
-        self.fuzzy_matcher.set_llm_matcher(self.llm_matcher)
-
-        self.logger.info("Music matcher initialized")
-
-    def __del__(self):
-        """Clean up resources on deletion."""
-        if hasattr(self, "run_id") and hasattr(self, "db"):
-            try:
-                self.db.end_run(self.run_id, "COMPLETED")
-            except Exception as e:
-                # Can't use logger here as it might be gone already
-                print(f"Error ending run: {str(e)}")
-
-    def match_track(self, track_id: str) -> Dict[str, Any]:
-        """Match a single Spotify track to YouTube Music.
-
-        Args:
-            track_id: Spotify track ID
-
-        Returns:
-            Best matching YouTube track
-
-        Raises:
-            Exception: If matching fails
-        """
-        self.logger.info(f"Matching track {track_id}")
+        self._log_debug(f"LLM PROMPT:\n{prompt}", divider=True)
 
         try:
-            # Get Spotify track data
-            spotify_track = self.spotify.get_track(track_id)
-
-            # Generate optimized search query
-            query = self.llm_client.generate_query(spotify_track)
-
-            # Search for candidates on YouTube Music
-            youtube_results = self.ytmusic.search_tracks(
-                query, max_results=Config.MAX_YOUTUBE_RESULTS
+            response = ollama.generate(
+                model="gemma3:12b",
+                prompt=prompt,
+                format="json",
+                options={"temperature": 0.3, "num_ctx": 4096},
             )
-
-            if not youtube_results:
-                error_msg = "No YouTube results found"
-                self.logger.warning(error_msg)
-
-                # Log to database
-                self.db.log_track_match(
-                    run_id=self.run_id,
-                    spotify_track_id=track_id,
-                    spotify_data=spotify_track,
-                    success=False,
-                    error_message=error_msg,
-                )
-
-                return {}
-
-            # Score candidates using fuzzy matching
-            scored_results = self.fuzzy_matcher.score_candidates(
-                spotify_track, youtube_results
-            )
-
-            # Select best match
-            best_match = self.fuzzy_matcher.select_best_match(
-                spotify_track, scored_results
-            )
-
-            # Log match to database
-            match_score = scored_results[0][0] if scored_results else None
-            self.db.log_track_match(
-                run_id=self.run_id,
-                spotify_track_id=track_id,
-                youtube_track_id=best_match.get("videoId"),
-                spotify_data=spotify_track,
-                youtube_data=best_match,
-                match_score=match_score,
-                matcher_used="fuzzy",
-                success=True,
-            )
-
-            return best_match
-
+            result = json.loads(response["response"])
+            self._log_debug(f"LLM RESPONSE:\n{response}", divider=True)
+            return candidates[result["index"]]
         except Exception as e:
-            error_msg = f"Error matching track {track_id}: {str(e)}"
-            self.logger.error(error_msg)
+            self._log_debug(f"LLM failed: {e}, using top candidate")
+            return candidates[0]
 
-            # Log error to database
-            try:
-                self.db.log_track_match(
-                    run_id=self.run_id,
-                    spotify_track_id=track_id,
-                    spotify_data={"id": track_id},
-                    success=False,
-                    error_message=error_msg,
-                )
-            except Exception as db_error:
-                self.logger.error(f"Failed to log error to database: {str(db_error)}")
+    # === Search Query Generation ===
 
-            raise
+    def generate_search_query(self, spotify_track: Dict) -> str:
+        """Use LLM or fallback to generate a YTMusic search query."""
+        metadata = {
+            "track": spotify_track.get("name", ""),
+            "artists": [a["name"] for a in spotify_track.get("artists", [])],
+            "album": spotify_track.get("album", {}).get("name", ""),
+            "duration": f"{spotify_track.get('duration_ms', 0) // 1000}s",
+            "isrc": spotify_track.get("external_ids", {}).get("isrc", "N/A"),
+        }
 
-    def match_playlist(
-        self, playlist_id: str, max_tracks: Optional[int] = None
-    ) -> Dict[str, Any]:
-        """Match all tracks in a Spotify playlist.
-
-        Args:
-            playlist_id: Spotify playlist ID
-            max_tracks: Optional maximum number of tracks to process
-
-        Returns:
-            Dictionary of results with statistics
-
-        Raises:
-            Exception: If playlist matching fails
-        """
-        self.logger.info(f"Matching playlist {playlist_id}")
-        start_time = time.time()
+        prompt = f"""Generate the most effective YouTube Music search query for:
+        Track: {metadata['track']}
+        Artists: {', '.join(metadata['artists'])}
+        Album: {metadata['album']}
+        Duration: {metadata['duration']}
+        ISRC: {metadata['isrc']}
+        Respond ONLY with the query."""
 
         try:
-            # Get track IDs from playlist
-            track_ids = self.spotify.get_playlist_tracks(
-                playlist_id, batch_size=Config.SPOTIFY_BATCH_SIZE
+            response = ollama.generate(
+                model="gemma3:12b", prompt=prompt, options={"temperature": 0.2}
             )
-
-            if max_tracks:
-                track_ids = track_ids[:max_tracks]
-
-            self.logger.info(f"Processing {len(track_ids)} tracks from playlist")
-
-            # Match each track
-            results = []
-            success_count = 0
-
-            for i, track_id in enumerate(track_ids):
-                try:
-                    self.logger.info(
-                        f"Processing track {i+1}/{len(track_ids)}: {track_id}"
-                    )
-                    match = self.match_track(track_id)
-
-                    if match:
-                        success_count += 1
-                        results.append(
-                            {
-                                "spotify_id": track_id,
-                                "youtube_id": match.get("videoId"),
-                                "title": match.get("title"),
-                                "success": True,
-                            }
-                        )
-                    else:
-                        results.append(
-                            {
-                                "spotify_id": track_id,
-                                "success": False,
-                                "error": "No match found",
-                            }
-                        )
-
-                except Exception as e:
-                    self.logger.error(f"Error matching track {track_id}: {str(e)}")
-                    results.append(
-                        {"spotify_id": track_id, "success": False, "error": str(e)}
-                    )
-
-            # Compute statistics
-            duration = time.time() - start_time
-            stats = {
-                "total_tracks": len(track_ids),
-                "successful_matches": success_count,
-                "failed_matches": len(track_ids) - success_count,
-                "success_rate": success_count / len(track_ids) if track_ids else 0,
-                "duration_seconds": duration,
-                "average_time_per_track": duration / len(track_ids) if track_ids else 0,
-            }
-
-            self.logger.info(
-                f"Playlist matching completed. Success rate: {stats['success_rate']:.2%}"
-            )
-
-            # Update run with statistics
-            self.db.end_run(self.run_id, "SUCCESS", stats)
-
-            return {"results": results, "stats": stats}
-
+            query = response["response"].strip().strip('"')
+            self._log_debug(f"Generated LLM query: {query}")
+            return query
         except Exception as e:
-            error_msg = f"Error matching playlist {playlist_id}: {str(e)}"
-            self.logger.error(error_msg)
+            self._log_debug(f"LLM query failed: {e}, using fallback")
+            return self._fallback_search_query(spotify_track)
 
-            # Mark run as failed
-            self.db.end_run(self.run_id, "FAILED", {"error": str(e)})
+    def _fallback_search_query(self, track: Dict) -> str:
+        """Basic heuristic fallback for search query generation."""
+        artists = [a["name"] for a in track.get("artists", [])]
+        album = track.get("album", {}).get("name", "")
+        keywords = {"remaster", "deluxe", "live", "version", "edit", "mix", "bonus"}
 
-            raise
+        parts = [track.get("name", ""), artists[0] if artists else ""]
+        if len(artists) > 1:
+            parts.append("feat. " + ", ".join(artists[1:]))
+        if any(k in album.lower() for k in keywords):
+            parts.append(album)
 
+        return re.sub(r"\s+", " ", " ".join(parts)).strip()
 
-def main():
-    """Command line entry point."""
-    parser = argparse.ArgumentParser(
-        description="Match Spotify tracks to YouTube Music"
-    )
-    parser.add_argument("--spotify-id", required=True, help="Spotify client ID")
-    parser.add_argument("--spotify-secret", required=True, help="Spotify client secret")
-    parser.add_argument(
-        "--ytmusic-auth", default="browser.json", help="Path to YTMusic auth file"
-    )
-    parser.add_argument("--playlist-id", help="Spotify playlist ID to match")
-    parser.add_argument("--track-id", help="Spotify track ID to match")
-    parser.add_argument(
-        "--max-tracks", type=int, help="Maximum tracks to process from playlist"
-    )
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    # === Playlist Utilities ===
 
-    args = parser.parse_args()
+    def get_playlist_tracks(
+        self, playlist_id: str, market: Optional[str] = None
+    ) -> List[str]:
+        """Retrieve track IDs from a Spotify playlist."""
+        tracks = []
+        offset, limit = 0, 100
 
-    if not args.playlist_id and not args.track_id:
-        print("Error: Either --playlist-id or --track-id must be specified")
-        sys.exit(1)
-
-    try:
-        app = MusicMatcherApp(
-            spotify_client_id=args.spotify_id,
-            spotify_client_secret=args.spotify_secret,
-            ytmusic_auth_path=args.ytmusic_auth,
-            debug=args.debug,
-        )
-
-        if args.track_id:
-            result = app.match_track(args.track_id)
-            print(f"Match result: {result}")
-        else:
-            results = app.match_playlist(args.playlist_id, args.max_tracks)
-            print(
-                f"Matched {results['stats']['successful_matches']} of {results['stats']['total_tracks']} tracks"
+        while True:
+            result = self.spotify.playlist_items(
+                playlist_id,
+                fields="items(track(id))",
+                limit=limit,
+                offset=offset,
+                market=market,
+                additional_types=["track"],
             )
-            print(f"Success rate: {results['stats']['success_rate']:.2%}")
+            if not result:
+                raise Exception("Results of playlist items are empty")
+            items = result.get("items", [])
+            tracks += [i["track"]["id"] for i in items if i.get("track", {}).get("id")]
+            if len(items) < limit:
+                break
+            offset += limit
 
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        sys.exit(1)
+        return tracks
 
+    def get_rekordbox_playlists(self, user_id: str) -> Dict[str, str]:
+        """Find playlists that look like rekordbox exports."""
+        playlists = self.spotify.user_playlists(user_id)
+        if not playlists:
+            raise Exception("Playlists are empty")
+        return {
+            p["name"]: p["id"] for p in playlists["items"] if "rekordbox_" in p["name"]
+        }
 
-if __name__ == "__main__":
-    main()
+    # === Helpers ===
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", text.lower())
+
+    @staticmethod
+    def _safe_get(d: dict, keys: List, default=None):
+        for key in keys:
+            try:
+                d = d[key]
+            except (KeyError, IndexError, TypeError):
+                return default
+        return d
