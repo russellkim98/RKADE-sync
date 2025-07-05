@@ -20,6 +20,7 @@ class MusicMatcher:
     LLM_SCORE_THRESHOLD = 85
     LLM_SCORE_DIFFERENCE = 15
     MAX_YOUTUBE_RESULTS = 10
+    OLLAMA_MODEL = "gemma3:12b"
 
     def __init__(
         self,
@@ -138,7 +139,7 @@ class MusicMatcher:
 
         try:
             response = ollama.generate(
-                model="gemma3:12b",
+                model="",
                 prompt=prompt,
                 format="json",
                 options={"temperature": 0.3, "num_ctx": 4096},
@@ -172,7 +173,7 @@ class MusicMatcher:
 
         try:
             response = ollama.generate(
-                model="gemma3:12b", prompt=prompt, options={"temperature": 0.2}
+                model=self.OLLAMA_MODEL, prompt=prompt, options={"temperature": 0.2}
             )
             query = response["response"].strip().strip('"')
             self._log_debug(f"Generated LLM query: {query}")

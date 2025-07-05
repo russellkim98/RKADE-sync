@@ -110,6 +110,10 @@ ENV/
 env.bak/
 venv.bak/
 index.txt
+music_downloads/
+ytdlp_downloads/
+ytmusic_cookies.txt
+
 
 # Spyder project settings
 .spyderproject
@@ -132,7 +136,6 @@ dmypy.json
 .DS_Store
 
 **/*.json
-**/*.ipynb
 
 **/sqlcipher3/
 .tmp/

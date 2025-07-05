@@ -21,6 +21,8 @@ fuzzywuzzy = "^0.18.0"
 levenshtein = "^0.27.1"
 pandas = "^2.2.3"
 streamlit = "^1.44.1"
+eyed3 = "^0.9.8"
+python-levenshtein = "^0.27.1"
 
 
 [build-system]
